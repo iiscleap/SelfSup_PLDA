@@ -8,7 +8,8 @@ Created on Mon Dec 30 15:51:43 2019
 
 This code is for DNN training 
 Explained in paper:
-P. Singh, S. Ganapathy, 
+P. Singh, S. Ganapathy, Self-Supervised Metric Learning With Graph Clustering For Speaker Diarization
+
 
 Check main shell scripts:  , to run for different parameters
 """
@@ -38,10 +39,6 @@ opt = params()
 # #select device
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = opt.gpuid
-
-# torch.manual_seed(777)  # reproducibility
-
-
 
 loss_lamda = opt.alpha
 dataset=opt.dataset
@@ -698,10 +695,9 @@ class Deep_AHC:
             N = len(labelfull)
             clusterlen_org = clusterlen.copy()
             nframe = output_new.shape[0]
-            # distance_matrix = (output_new+1)/2
-            # output_new = output_new/np.max(abs(output_new))
+           
             distance_matrix = 1/(1+np.exp(-output_new))
-            # distance_matrix = output_new
+    
             if opt.threshold != None:
                  n_clusters = 1
             final_k = min(self.K, nframe - 1) 
@@ -787,6 +783,8 @@ class Deep_AHC:
 
 def main():
     seed=555
+    
+
     if "dihard" in opt.dataset:
         target_energy = 1
         xvecD=512

@@ -57,8 +57,8 @@ $ ln -sf $KALDI_ROOT/egs/wsj/s5/steps .  # steps dir
  ```
  #### SelfSup-PLDA Training
  - xvec_SSC_train.py is code for DNN training
- - run_xvec_ssc_ami.sh/run_xvec_ssc_dihard.sh calls DNN training script
- - Update training parameters in run_xvec_ssc_ami.sh/run_xvec_ssc_dihard.sh 
+ - run_xvec_ssc_asru.sh calls DNN training script
+ - Update training parameters in run_xvec_ssc_asru.sh
  **NOTE** that by default Kaldi scripts are configured for execution on a grid using a submission engine such as SGE or Slurm. If you are running the recipes on a single machine, make sure to edit ``cmd.sh`` and ``tools_dir/cmd.sh`` so that the line
 ```sh
    $ export train_cmd="queue.pl"
