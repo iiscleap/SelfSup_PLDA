@@ -1,6 +1,5 @@
 #!/bin/bash
 
-
 # This script is modified version of egs/callhome_diarization/v2/run.sh for AMI dataset,
 # Till stage 2, involves feature extraction and x-vector extraction using pretrained model
 # Stage 2 and Stage 3 involves converting x-vectors into numpy format and creating data folders needed for SSC training
@@ -10,15 +9,29 @@
 set -e
 mfccdir=`pwd`/mfcc
 vaddir=`pwd`/mfcc
-data_root=path/of/AMIcorpus   # AMI dataset path 
+default=path/of/AMIcorpus 
+data_root=$default   # AMI dataset path 
+
+data_root=/home/data/amicorpus
 stage=0
-nnet_dir=etdnn_fbank_xvector_models/exp/xvector_nnet_1a/  # path of xvector model
+modelpath=etdnn_fbank_xvector_models/exp/xvector_nnet_1a
+nnet_dir=exp/xvector_nnet_1a/  # path of xvector model
 conf=etdnn_fbank_xvector_models/conf
 njobs=15
+
+if [ $data_root = $default ]; then
+  echo " Usage
+  $0 --data_root <path of AMI corpus> --stage <0/1/2/3> 
+  stage: 0 (default) - data folder generation till end, 1: MFCC extraction till end, 2: X-vector extraction till end, 3: SelfSup data preparation
+  "
+  
+  exit 1;
+fi
+
 # Prepare datasets
 if [ $stage -le 0 ]; then
 
-  ./setup.sh  $KALDI_ROOT  $data_root > log.out 2>&1 
+  ./setup.sh  $KALDI_ROOT  $data_root #> log.out 
 
 fi
 
@@ -27,7 +40,7 @@ if [ $stage -le 1 ]; then
 
   for name in ami_dev ami_eval; do
   
-  steps/make_fbank.sh --write-utt2num-frames true --fbank-config $conf/fbank_16k.conf --nj $njobs \
+  steps/make_fbank.sh --write-utt2num-frames true --fbank-config $conf/fbank.conf --nj $njobs \
         --cmd "${train_cmd}" data/${name} exp/make_fbank/${name} $fbankdir
     utils/fix_data_dir.sh data/${name}
 
@@ -36,7 +49,11 @@ if [ $stage -le 1 ]; then
   for name in ami_dev ami_eval; do
     local/nnet3/xvector/prepare_feats.sh --nj $njobs --cmd "$train_cmd" \
       data/$name data/${name}_cmn exp/${name}_cmn
+
+      cp data/$name/segments data/${name}_cmn/
       utils/fix_data_dir.sh data/${name}_cmn
+
+       
   done
 
  fi
@@ -45,7 +62,7 @@ if [ $stage -le 1 ]; then
 if [ $stage -le 2 ]; then
   # Extract x-vectors for the ami_dev and ami_eval sets.
   for dataset in ami_dev ami_eval; do
-    diarization/nnet3/xvector/extract_xvectors.sh --cmd "$train_cmd --mem 5G" \
+    local/nnet3/xvector/extract_xvectors.sh --cmd "$train_cmd --mem 5G" \
       --nj $njobs --window 1.5 --period 0.75 --apply-cmn false \
       --min-segment 0.5 $nnet_dir \
       data/${dataset}_cmn $nnet_dir/xvectors_${dataset}
