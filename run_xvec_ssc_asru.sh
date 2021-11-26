@@ -24,16 +24,16 @@ dataset=$dataset_etdnn
 
 dataset_plda=dihard_dev_2020
 
-alpha=0.8
 eta=0.5
 
-outf=exp/selfsup_pic_alpha${alpha}_eta${eta}/${dataset_etdnn}_scores/
+outf=exp/selfsup_pic_eta${eta}/${dataset_etdnn}_scores/
 
 
 TYPE=parallel # training parallely multiple utterances
 nj=40 # number of jobs for parallelizing
 which_python=python # python with all needed installation
-kaldi_recipe_path=/data1/prachis/Dihard_2020/Dihard_2020_track1
+
+
 pldafold=plda_pca_baseline/${dataset_etdnn}_scores/plda_scores/
 echo "path of plda basline scores: $pldafold"
 mkdir -p $pldafold
@@ -42,23 +42,30 @@ mkdir -p $outf/
 . ./cmd.sh
 . ./path.sh
 
+if [ ! -d "utils" ];then
+      ln -sf $KALDI_ROOT/egs/wsj/s5/utils .
+fi
+
+main_dir=default
 . ./utils/parse_options.sh
 
-main_dir=/data1/prachis/Dihard_2020/SSC/
+
+kaldi_recipe_path=$main_dir/tools_diar
 
 if [ $main_dir = "default" -o $kaldi_recipe_path = "default" ]; then
 	echo "need main_directory full path as argument"
 	echo " Set arguments for training in the code"
-	echo "Usage : bash run_xvec_ssc_asru.sh --TYPE <parallel/None> --nj <number of jobs> --which_python <python with all requirements> <full path of main directory>"
+	echo "Usage : bash run_xvec_ssc_asru.sh --TYPE <parallel/None> --nj <number of jobs> --which_python <python with all requirements> --main_dir <full path of main directory>"
 	exit 1
 fi
-
+njobs=`cat lists/$dataset_etdnn/$dataset_etdnn.list | wc -l`
+nj=$((${nj}<${njobs}?${nj}:${njobs}))
 # reco2num_spk: lists/$dataset/tmp/split$nj/JOB/reco2numspk_ahcinit_eend_overlap
 
 if [ $TYPE == "parallel" ]; then 
      if [ ! -d lists/$dataset/tmp/split$nj ] || [ ! "$(ls -A lists/$dataset/tmp/split$nj/1)" ]; then
         
-    	utils/split_data_mine.sh $main_dir/lists/$dataset/tmp $nj || exit 1;
+    	tools_diar/split_data_mine.sh $main_dir/lists/$dataset/tmp $nj || exit 1;
         
 	fi
     
@@ -72,12 +79,11 @@ if [ $TYPE == "parallel" ]; then
 	--epochs 5 \
 	--lr 1e-3 \
     --eta $eta \
-	--alpha $alpha \
 	--band $band \
 	--dataset $dataset_etdnn \
 	--outf $outf \
 	--xvecpath $kaldi_recipe_path/xvectors_npy/${dataset_etdnn}/ \
-	--reco2num_spk lists/$dataset_etdnn/tmp/split$nj/JOB/reco2num_spk_ahc_init_th-0.7 \
+	--reco2num_spk lists/$dataset_etdnn/tmp/split$nj/JOB/reco2num_spk \
 	--filetrain_list lists/$dataset/tmp/split$nj/JOB/dataset.list \
 	--reco2utt_list lists/$dataset/tmp/split$nj/JOB/spk2utt \
 	--segments lists/$dataset/segments_xvec \
@@ -94,8 +100,6 @@ else
 	--epoch 10 \
 	--lr 1e-3 \
     --eta 0.2 \
-	--lamda 0.0 \
-	--gamma 0.4 \
 	--dataset $dataset \
 	--outf $outf \
 	--xvecpath $kaldi_recipe_path/xvectors_npy/${dataset}/ \

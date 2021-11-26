@@ -31,21 +31,29 @@ from pdb import set_trace as bp
 sys.path.insert(0,'services/')
 import kaldi_io
 import services.agglomerative_dihard as ahc
+from services.agglomerative_dihard import AHC
 import services.pic_dihard_ami as pic
 
+from services.set_gpu import cuda_gpu_available
 
 # read arguments
 opt = params()
 # #select device
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = opt.gpuid
 
-loss_lamda = opt.alpha
+
 dataset=opt.dataset
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
 # device = 'cpu'
-print(device)
+
+if int(opt.gpuid)>=0:
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(device)
+    opt.gpuid = str(cuda_gpu_available())
+    os.environ["CUDA_VISIBLE_DEVICES"] = opt.gpuid
+else:
+    device = 'cpu'
 
 # Model defined here
 def normalize(system):
@@ -79,7 +87,7 @@ def mostFrequent(arr, n):
 
 
 class Deep_AHC:
-    def __init__(self,pldamodel,fname,reco2utt,xvecdimension,n_prime,writer=None):
+    def __init__(self,pldamodel,fname,reco2utt,xvecdimension,n_prime):
         self.reco2utt = reco2utt
         self.xvecD = xvecdimension
         # self.model = model
@@ -171,7 +179,7 @@ class Deep_AHC:
         for ind in uni_gnd:
             index = np.where(labelfull==ind)[0]
             mask_clean[np.ix_(index,index)] = 1 
-        # bp()
+        
         # scores_clean = scores_clean * mask_clean
         mask_clean[np.tril_indices(N_clean)] = -1
         full_target = mask_clean[np.triu_indices(N_clean,k=1)]
@@ -211,11 +219,12 @@ class Deep_AHC:
         
         print('minibatches shape: ',minibatches.shape)
         # pos_weight = torch.FloatTensor ([N_nontarget / N_target], device=device)
-        pos_weight = torch.FloatTensor ([1], device=device)
+        
+        pos_weight = torch.FloatTensor([1]).to(device)
         if soft:
-            return y,full_target_soft,minibatches,pos_weight
+            return y,full_target_soft.to(device),minibatches,pos_weight
         else:
-            return y,full_target,minibatches,pos_weight
+            return y,full_target.to(device),minibatches,pos_weight
     
     
     def compute_loss(self,A,minibatch,lamda):
@@ -261,12 +270,12 @@ class Deep_AHC:
             # np.save(opt.xvecpath+f+'.npy',system)
 
         x1_array=system[np.newaxis]
-        data_tensor = torch.from_numpy(x1_array).float()
+        data_tensor = torch.from_numpy(x1_array).float().to(device)
         self.data = data_tensor
         return filelength
     
    
-    def train_with_selective_binary_entropy(self,model_init,pretrain=0):
+    def train_with_selective_binary_entropy(self,model_init,pretrain=0,target_energy=0):
         """
         Train the SSC using N* clusters using PIC
 
@@ -280,7 +289,7 @@ class Deep_AHC:
 
         """
        
-        alpha = loss_lamda # final stage
+        
         count = 0
         f = self.fname
         data = self.data
@@ -310,8 +319,8 @@ class Deep_AHC:
         current_lr = opt.lr
         labelfull_feed=np.arange(nframe)
         clusterlen_feed=[1]*len(labelfull_feed)
-        target = 1
-        affinity_init,plda_init,PCA_transform = model_init.compute_plda_affinity_matrix(self.pldamodel,inpdata,target=target) # original filewise PCA transform
+        # target = 1
+        affinity_init,plda_init,PCA_transform = model_init.compute_plda_affinity_matrix(self.pldamodel,inpdata,target=target_energy) # original filewise PCA transform
         
         pca_dim = PCA_transform.shape[0]
         net = Deep_Ahc_model(self.pldamodel,plda_init,dimension=self.xvecD,red_dimension=pca_dim,device=device)
@@ -319,7 +328,6 @@ class Deep_AHC:
         
         # Optimizer
         optimizer = optim.Adam(filter(lambda p: p.requires_grad,model.parameters()), lr=opt.lr)
-        
         
         model.eval()
         # initialize filewise PCA using svd                  
@@ -368,9 +376,9 @@ class Deep_AHC:
             mypic =pic.PIC_ami_threshold(n_clusters,clusterlen_old,labelfull_old,distance_matrix.copy(),threshold,K=final_k,z=self.z) 
 
         if threshold is not None:
-            labelfull,clusterlen,W = mypic.gacCluster_org() 
+            labelfull,clusterlen = mypic.gacCluster_org() 
         else:
-            labelfull,clusterlen,W = mypic.gacCluster_oracle_org()
+            labelfull,clusterlen = mypic.gacCluster_oracle_org()
         n_clusters = len(clusterlen)
         cluster = self.compute_cluster(labelfull)
         phi_count = min(0,phi_count - 1)
@@ -399,6 +407,7 @@ class Deep_AHC:
         per_loss = opt.eta
       
         soft =0
+        clean_ind = []
         y,target,minibatches,pos_weight = self.compute_bce_scores_loss(output[0],labelfull,clean_ind,soft=soft)
         self.sigmoid = nn.Sigmoid()
         if soft:
@@ -408,7 +417,6 @@ class Deep_AHC:
         else:
             self.compute_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
             
-
         avg_loss = self.compute_bce(y,target)
         
         print('loss_initial:',avg_loss)
@@ -492,7 +500,7 @@ class Deep_AHC:
             os.makedirs(opt.outf+'/models/')
         torch.save(model.state_dict(),opt.outf+'/models/'+f+'.pth')
     
-    def train_with_ahc_binary_entropy(self,model_init,pretrain=0,target_energy=target_energy):
+    def train_with_ahc_binary_entropy(self,model_init,pretrain=0,target_energy=0):
         """
         Train the SSC using N* clusters using PIC
 
@@ -506,7 +514,7 @@ class Deep_AHC:
 
         """
        
-        alpha = loss_lamda # final stage
+        
         count = 0
         f = self.fname
         data = self.data
@@ -749,12 +757,12 @@ class Deep_AHC:
             f = self.fname
             overlap =1
             clusterlen_org = clusterlen.copy()
+            
             if opt.threshold == None or self.final==0:
-                myahc =ahc.clustering(n_clusters, clusterlen_org,labelfull,dist=None)
+                labelfull = AHC(output_new, threshold=opt.threshold,nspeaker=n_clusters)
             else:
-                myahc =ahc.clustering(None, clusterlen_org,labelfull,dist=float(opt.threshold))
-            labelfull,clusterlen = myahc.Ahc_full(output_new)
-            print('clusterlen:',clusterlen)
+                labelfull = AHC(output_new, threshold=opt.threshold,nspeaker=None)
+             
             self.results_dict[f]=labelfull
             if self.final:
                 if self.forcing_label:
@@ -840,10 +848,10 @@ def main():
         else:
             n_prime = 2 # needs atleast 2 clusters
         
-        
         print('output_folder:',opt.outf)
         ahc_obj = Deep_AHC(kaldimodel,fname,reco2utt,xvecD,n_prime)
         filelength = ahc_obj.dataloader_from_list()
+        
         if opt.clustering == 'pic':             
             ahc_obj.train_with_selective_binary_entropy(model_init,pretrain=0,target_energy=target_energy)
         else:

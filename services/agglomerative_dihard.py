@@ -1,0 +1,545 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Jan  9 11:37:59 2021
+
+@author: Prachi
+"""
+
+import numpy as np
+import argparse
+import sys
+import os
+import matplotlib.pyplot as plt
+import pickle
+from pdb import set_trace as bp
+import subprocess
+import scipy.io as sio
+from scipy.sparse import coo_matrix
+import pic_dihard_ami as mypic
+
+sys.path.insert(0,os.getcwd())
+sys.path.insert(0,os.getcwd()+'/../SelfSup_PLDA')
+
+
+def setup():
+    """Get cmds and setup directories."""
+    cmdparser = argparse.ArgumentParser(description='Do speaker clsutering based on'\
+                                                    'my ahc',
+                                        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    cmdparser.add_argument('--threshold', help='threshold for clustering',
+                            type=float, default=None)
+    cmdparser.add_argument('--lamda', help='lamda for clustering',
+                            type=float, default=0)
+    # cmdparser.add_argument('--custom-dist', help='e.g. euclidean, cosine', type=str, default=None)
+    cmdparser.add_argument('--reco2utt', help='spk2utt to create labels', default='../swbd_diar/exp/callhome1/spk2utt')
+    cmdparser.add_argument('--reco2num', help='reco2num_spk to get true speakers', default='None')
+    cmdparser.add_argument('--label-out', dest='out_file',
+                           help='output file used for storing labels', default='../generated_rttm_new/rttm_callhome_my_clustering/cosine/labels')
+    # cmdparser.add_argument('--minMaxK', nargs=2, default=[2, 10])
+    cmdparser.add_argument('--score_file', help='file containing list of score matrices', type=str,default='../lists/callhome1/callhome1.list')
+    cmdparser.add_argument('--score_path', help='path of scores', type=str,default='../scores_cosine/callhome1_scores')
+    cmdparser.add_argument('--using_init', help='if initialisation is needed', type=int,default=0)
+    cmdparser.add_argument('--dataset', help='dataset name', type=str, default="callhome1")
+    cmdparser.add_argument('--k', type=float, default=30)
+    cmdparser.add_argument('--z', type=float, default=0.1)
+    cmdparser.add_argument('--clustering', type=str, default='PIC')
+    # cmdparser.add_argument('--out_path', help='path of output scores', type=str, default=None)
+    cmdparser.add_argument('--weight', help='weight for fusion',
+                            type=float, default=1.0)
+    cmdargs = cmdparser.parse_args()
+    return cmdargs
+
+
+def AHC(sim_mx, threshold=None,nspeaker=1):
+    """ Performs UPGMA variant (wikipedia.org/wiki/UPGMA) of Agglomerative
+    Hierarchical Clustering using the input pairwise similarity matrix.
+    Input:
+        sim_mx    - NxN pairwise similarity matrix
+        threshold - threshold for stopping the clustering algorithm
+                    (see function twoGMMcalib_lin for its estimation)
+    Output:
+        cluster labels stored in an array of length N containing (integers in
+        the range from 0 to C-1, where C is the number of dicovered clusters)
+    """
+    dist = -sim_mx
+    dist[np.diag_indices_from(dist)] = np.inf
+    clsts = [[i] for i in range(len(dist))]
+    clst_count = len(dist)
+    print('start speaker count: ',clst_count)
+    while True:
+        mi, mj = np.sort(np.unravel_index(dist.argmin(), dist.shape))
+        if threshold is None:
+            if clst_count==nspeaker:
+                print('nspeaker: ',clst_count)
+                break
+        else:
+            if dist[mi, mj] > -threshold:
+                break
+        dist[:, mi] = dist[mi,:] = (dist[mi,:]*len(clsts[mi])+dist[mj,:]*len(clsts[mj]))/(len(clsts[mi])+len(clsts[mj]))
+        dist[:, mj] = dist[mj,:] = np.inf
+        clsts[mi].extend(clsts[mj])
+        clsts[mj] = None
+        clst_count = clst_count - 1
+    labs= np.empty(len(dist), dtype=int)
+    for i, c in enumerate([e for e in clsts if e]):
+        labs[c] = i
+    return labs
+
+def compute_affinity_matrix(X):
+        """Compute the affinity matrix from data.
+
+        Note that the range of affinity is [0,1].
+
+        Args:
+            X: numpy array of shape (n_samples, n_features)
+
+        Returns:
+            affinity: numpy array of shape (n_samples, n_samples)
+        """
+        # Normalize the data.
+        l2_norms = np.linalg.norm(X, axis=1)
+        X_normalized = X / l2_norms[:, None]
+        # Compute cosine similarities. Range is [-1,1].
+        cosine_similarities = np.matmul(X_normalized, np.transpose(X_normalized))
+        # Compute the affinity. Range is [0,1].
+        # Note that this step is not mentioned in the paper!
+        affinity = cosine_similarities
+
+        # affinity = (cosine_similarities + 1.0) / 2.0
+        return affinity
+
+
+def unique(arr, return_ind=False):
+    if return_ind:
+        k = 0
+        d = dict()
+        uniques = np.empty(arr.size, dtype=arr.dtype)
+        indexes = np.empty(arr.size, dtype='i')
+        for i, a in enumerate(arr):
+            if a in d:
+                indexes[i] = d[a]
+            else:
+                indexes[i] = k
+                uniques[k] = a
+                d[a] = k
+                k += 1
+        return uniques[:k], indexes
+    else:
+        _, idx = np.unique(arr, return_index=True)
+        return arr[np.sort(idx)]
+
+
+class clustering:
+    def __init__(self,n_clusters,clusterlen,labelfull,lamda=0.0,dist=None):
+        self.n_clusters = n_clusters
+        self.labelfull = labelfull.copy()
+        self.mergeind = []
+        self.eta = 0.1
+        self.kc = 2
+        self.max_10per_scores = 5
+        self.lamda = lamda
+        self.clusterlen = clusterlen.copy()
+       
+        # self.clusterlen=[1]*len(labelfull)
+        self.dist = dist
+        self.minloss_current = 1000
+
+    def initialize_clusters(self,A):
+        sampleNum = len(A)
+        NNIndex = np.argsort(A)[:,::-1]
+        clusterLabels = np.ones((sampleNum, 1),dtype=int)*(-1)
+        counter = 0
+        for i in range(sampleNum):
+            idx = NNIndex[i,:2]
+            assignedCluster = clusterLabels[idx]
+            assignedCluster = np.unique(assignedCluster[assignedCluster >= 0])
+            if len(assignedCluster) == 0:
+                clusterLabels[idx] = counter
+                counter = counter + 1
+            elif len(assignedCluster) == 1:
+                clusterLabels[idx] = assignedCluster
+            else:
+                clusterLabels[idx] = assignedCluster[0];            
+                for j in range(1,len(assignedCluster)):
+                    clusterLabels[clusterLabels == assignedCluster[j]] = assignedCluster[0]
+            
+        uniqueLabels = np.unique(clusterLabels)
+        clusterNumber = len(uniqueLabels)
+        
+        self.labelfull = clusterLabels[:,0].astype(int)
+        initialClusters = []
+        output_new = A.copy()
+        clusterlist=[]
+        for i,lab in enumerate(uniqueLabels):
+            ind=np.where(clusterLabels==lab)[0]
+            cluster_count = len(ind)
+            initialClusters.append(cluster_count)
+            clusterlist.append(ind[0])
+            avg=np.sum(output_new[ind],axis=0)
+            output_new[ind[0]]=avg
+            output_new[:,ind[0]]=avg
+        #     initialClusters{i} = find(clusterLabels(:) == uniqueLabels(i));
+        self.clusterlen = initialClusters
+        output_new = output_new[np.ix_(clusterlist,clusterlist)]
+        return self.labelfull,self.clusterlen,output_new  
+
+    def compute_distance(self):
+        colvec = np.array(self.clusterlen).reshape(-1,1)
+        tmp_mat = np.dot(colvec,colvec.T)
+        return (1/tmp_mat)
+
+    def Ahc_full(self,A):
+        self.A = A.copy()
+        while 1:        
+            B = self.A.copy()
+            tmp_mat=self.compute_distance()
+            self.A = self.A*tmp_mat # all elementwise operation
+            self.A = np.triu(self.A,k=1)
+            cur_samp = self.A.shape[0]
+            minA = np.min(self.A)
+            self.A[np.tril_indices(cur_samp)]=-abs(minA)*100
+            if cur_samp < 20:
+                min_len =  min(20,int(0.1*len(self.labelfull)))
+                predicted_clusters =len(np.array(self.clusterlen)[np.array(self.clusterlen)>=min_len])
+            if cur_samp <=10:
+                print('predicted_clusters:',predicted_clusters)
+            if self.n_clusters != None:
+                if cur_samp == self.n_clusters:
+                    return self.labelfull,self.clusterlen
+                if self.dist!=None:
+                   if ((self.A<self.dist).all() or cur_samp==1):
+                           return self.labelfull,self.clusterlen
+            else:
+                if (self.A<self.dist).all() or cur_samp==1:
+                    if predicted_clusters >= cur_samp:
+                        return self.labelfull,self.clusterlen
+           
+            ind = np.where(self.A==np.amax(self.A))
+            minind = min(ind[0][0],ind[1][0])
+            maxind = max(ind[0][0],ind[1][0])
+            trackind = [list(np.where(self.labelfull==minind)[0])]
+            trackind.extend(np.where(self.labelfull==maxind)[0])
+            if minind == maxind:
+                print(minind,maxind)
+            self.clusterlen[minind] +=self.clusterlen[maxind]
+            self.clusterlen.pop(maxind)
+            self.labelfull[np.where(self.labelfull==maxind)[0]]=minind
+            unifull = list(np.unique(self.labelfull))
+            labelfullnew = np.zeros(self.labelfull.shape).astype(int)
+            for i in range(len(self.labelfull)):
+                labelfullnew[i]=unifull.index(self.labelfull[i])
+            self.labelfull = labelfullnew
+            self.mergeind.append(trackind)
+            newsamp = cur_samp -1
+            # recomputation
+            B[:,minind] =B[:,minind]+B[:,maxind]
+            B[minind] = B[:,minind]
+            B = np.delete(B,maxind,1)
+            B = np.delete(B,maxind,0)
+            B[np.diag_indices(newsamp)]=np.min(B)
+            B[np.diag_indices(newsamp)] = np.max(B,axis=1)
+            self.A = B.copy()
+        return self.labelfull,self.clusterlen
+
+
+    def get_params(self):
+        return self.labelfull, self.mergeind
+
+   
+def write_results_dict(results_dict, output_file,reco2utt):
+    """Writes the results in label file"""
+
+    output_label = open(output_file,'w')
+    reco2utt = open(reco2utt,'r').readlines()
+    i=0
+
+    for meeting_name, hypothesis in results_dict.items():
+        
+        reco = reco2utt[i].split()[0]
+        utts = reco2utt[i].rstrip().split()[1:]
+        if reco == meeting_name:
+            for j,utt in enumerate(utts):
+                if np.isscalar(hypothesis[j]): 
+                    towrite = utt +' '+str(hypothesis[j])+'\n'
+                else:
+                    if hypothesis[j,1]==-1:
+                        towrite = utt +'\t'+str(hypothesis[j,0])+'\n'
+                    else: 
+                        towrite = utt +'\t'+str(hypothesis[j,0])+' '+str(hypothesis[j,1])+'\n'
+                output_label.writelines(towrite)     
+        else:
+            print('reco mismatch!')
+            
+             
+        i=i+1
+
+def PIC_clustering():
+    args = setup()
+    fold = args.score_path
+    file_list = open(args.score_file,'r').readlines()
+    out_file = args.out_file
+    reco2utt = args.reco2utt
+    reco2num = args.reco2num
+    threshold=args.threshold
+    dataset = args.dataset
+    weight = args.weight
+    
+    neb = 2
+    beta1 = 0.95
+    per_k=args.k
+    k= int(args.k)
+    z=args.z
+    
+    print(threshold)
+    if reco2num != 'None':
+        reco2num_spk = open(args.reco2num).readlines()
+    results_dict ={}
+    for i,fn in enumerate(file_list):
+        f=fn.rsplit()[0]
+        print("filename:",f)
+        out_affinity = None
+        # out_affinity =  os.path.dirname(out_file)+'/pic_affinity_10/'+f+'.npy'
+        if "baseline" in fold :
+            b = np.load(fold+'/'+f+'.npy')
+            # b = b/np.max(abs(b))
+            # bp()
+
+            b = 1/(1+np.exp(-b))
+            # b = (b+1)/2
+        else:
+            if os.path.isfile(fold+'/'+f+'.pkl'):
+                deepahcmodel = pickle.load(open(fold+'/'+f+'.pkl','rb'))
+                b = deepahcmodel['output']
+            else:
+                b = np.load(fold+'/'+f+'.npy')
+            #b = b/np.max(abs(b))
+            b = 1/(1+np.exp(-b))
+        #fold_plda='/data1/prachis/Dihard_2020/SSC/plda_pca_baseline/dihard_dev_2020_track1_wide_scores/plda_scores'
+        # fold_plda='/data1/prachis/Dihard_2020/SSC/plda_pca_baseline/dihard_dev_2020_track1_fbank_jhu_wide_scores/plda_scores'
+        # fold_plda='/data1/prachis/Dihard_2020/SSC/plda_pca_baseline/dihard_dev_2020_track1_ftdnn_scores/plda_scores'
+
+        #b_plda = np.load(fold_plda+'/'+f+'.npy')
+        #b_plda = b_plda/np.max(abs(b_plda))
+        
+        #b = weight * b + (1-weight)*b_plda
+        #b = 1/(1+np.exp(-b))
+
+        # nframe = b.shape[0]
+        # # # weighting for temporal weightage
+        N= b.shape[0]
+        toep = np.abs(np.arange(N).reshape(N,1)-np.arange(N).reshape(1,N))
+        toep[toep>neb] = neb
+        weighting = beta1**(toep)
+        b = weighting*b
+            
+        # F_ratio,_ = compute_f_ratio(f,dataset,b)
+        # print('F_ratio: {}'.format(F_ratio))
+        clusterlen = [1]*b.shape[0]
+        labels = np.arange(b.shape[0])
+        filelength = len(b)
+        # if filelength <= k:
+        #     k= int(0.5*filelength)
+        
+        # k = int(max(1,per_k*filelength))
+        k = min(k,filelength-1)
+        print('filelength:',len(b))
+        print('k:{}, z:{}'.format(k,z))
+        # bp()
+        if reco2num != 'None':
+            try:
+                n_clusters = int(reco2num_spk[i].split()[1])      
+            except:
+                n_clusters = 2
+            n_clusters = min(n_clusters,len(clusterlen)) # whichever is minimum
+            if f!=reco2num_spk[i].split()[0]:
+                print('file mismatch',f,reco2num_spk[i].split()[0])
+            threshold = None
+            affinity = b.copy()
+            
+            clus = mypic.PIC_dihard_threshold(n_clusters,clusterlen,labels,affinity,K=k,z=z)
+            
+            if "baseline" in fold :
+                labelfull,clusterlen= clus.gacCluster_oracle_org()
+            else:
+                labelfull,clusterlen= clus.gacCluster_oracle()
+            
+            n_clusters = len(clusterlen)
+            print("filename: {} n_clusters:{} clusterlen:{}".format(f,n_clusters,clusterlen))
+
+        else:
+            affinity = b.copy()
+            n_clusters = 1  # atleast 1 speaker
+            clus = mypic.PIC_dihard_threshold(n_clusters,clusterlen,labels,affinity,threshold,K=k,z=z,)
+
+            if "baseline" in fold:
+                labelfull,clusterlen= clus.gacCluster_org()
+            else:
+                labelfull,clusterlen= clus.gacCluster()
+            n_clusters = len(clusterlen)
+            print("filename: {} n_clusters:{} clusterlen:{}".format(f,n_clusters,clusterlen))
+
+        uni1,method1=unique(labelfull,True)
+        results_dict[f]=method1
+    write_results_dict(results_dict, out_file,reco2utt)
+
+   
+def PIC_clustering_init():
+    args = setup()
+    fold = args.score_path
+    file_list = open(args.score_file,'r').readlines()
+    out_file = args.out_file
+    reco2utt = args.reco2utt
+    reco2num = args.reco2num
+    threshold=args.threshold
+    weight = args.weight
+    neb = 2
+    beta1 = 0.95
+    per_k=args.k
+    k= int(args.k)
+    z=args.z
+    
+    print(threshold)
+    if reco2num != 'None':
+        reco2num_spk = open(args.reco2num).readlines()
+    results_dict ={}
+    for i,fn in enumerate(file_list):
+        f=fn.rsplit()[0]
+        print("filename:",f)
+        out_affinity = None
+        # out_affinity =  os.path.dirname(out_file)+'/pic_affinity_10/'+f+'.npy'
+        if "baseline" in fold :
+            b = np.load(fold+'/'+f+'.npy')
+            # b = b/np.max(abs(b))
+            # b = 1/(1+np.exp(-b))
+            # b = (b+1)/2
+        else:
+            if os.path.isfile(fold+'/'+f+'.pkl'):
+                deepahcmodel = pickle.load(open(fold+'/'+f+'.pkl','rb'))
+                b = deepahcmodel['output']
+            else:
+                b = np.load(fold+'/'+f+'.npy')
+            fold_plda='/data1/prachis/Dihard_2020/SSC/plda_pca_baseline/dihard_dev_2020_track1_wide_scores/plda_scores'
+            b_plda = np.load(fold_plda+'/'+f+'.npy')
+            b_plda = b_plda/np.max(abs(b_plda))
+            b_plda = 1/(1+np.exp(-b_plda))
+
+            b = b/np.max(abs(b))
+            b = 1/(1+np.exp(-b))
+            # nframe = b.shape[0]
+            # # # weighting for temporal weightage
+            # N= b.shape[0]
+            # toep = np.abs(np.arange(N).reshape(N,1)-np.arange(N).reshape(1,N))
+            # toep[toep>neb] = neb
+            # weighting = beta1**(toep)
+            # b = weighting*b
+            
+
+        clusterlen = [1]*b.shape[0]
+        labels = np.arange(b.shape[0])
+        filelength = len(b)
+        # if filelength <= k:
+        #     k= int(0.5*filelength)
+        
+        # k = int(max(1,per_k*filelength))
+        k = min(k,filelength-1)
+        print('filelength:',len(b))
+        print('k:{}, z:{}'.format(k,z))
+        # bp()
+        if reco2num != 'None':
+            try:
+                n_clusters = int(reco2num_spk[i].split()[1])      
+            except:
+                n_clusters = 2
+            n_clusters = min(n_clusters,len(clusterlen)) # whichever is minimum
+            if f!=reco2num_spk[i].split()[0]:
+                print('file mismatch',f,reco2num_spk[i].split()[0])
+            threshold = None
+            affinity = b.copy()
+            
+            clus_org = mypic.PIC_dihard_threshold(n_clusters,clusterlen,labels,b_plda,K=k,z=z)
+
+            labelfull,clusterlen= clus_org.gacCluster_oracle_org(init=1)
+
+            clus = mypic.PIC_dihard_threshold(n_clusters,clusterlen,labelfull,affinity,K=k,z=z)
+            
+            if "baseline" in fold or filelength <200:
+                labelfull,clusterlen= clus.gacCluster_oracle_org()
+            else:
+                labelfull,clusterlen= clus.gacCluster_oracle()
+            
+            n_clusters = len(clusterlen)
+            print("filename: {} n_clusters:{} clusterlen:{}".format(f,n_clusters,clusterlen))
+
+        else:
+            affinity = b.copy()
+            n_clusters = 1  # atleast 1 speaker
+            clus = mypic.PIC_dihard_threshold(n_clusters,clusterlen,labels,affinity,K=k,z=z)
+
+            if "baseline" in fold:
+                labelfull,clusterlen= clus.gacCluster_org()
+            else:
+                labelfull,clusterlen= clus.gacCluster()
+            n_clusters = len(clusterlen)
+            print("filename: {} n_clusters:{} clusterlen:{}".format(f,n_clusters,clusterlen))
+
+        uni1,method1=unique(labelfull,True)
+        results_dict[f]=method1
+    write_results_dict(results_dict, out_file,reco2utt)
+
+def AHC_clustering():
+    args = setup()
+    fold = args.score_path
+    file_list = np.genfromtxt(args.score_file,dtype=str)
+    out_file = args.out_file
+    reco2utt = args.reco2utt
+    reco2num = args.reco2num
+    threshold=args.threshold
+    
+    dataset = fold.split('/')[-3]
+    
+    print(threshold)
+    if reco2num != 'None':
+        reco2num_spk = open(args.reco2num).readlines()
+    results_dict ={}
+    for i,f in enumerate(file_list):
+        print(f)
+
+        if "baseline" in fold:
+            b = np.load(fold+'/'+f+'.npy')
+            b = b/np.max(abs(b))
+            # b = 1/(1+np.exp(-b))
+        else:
+            if os.path.isfile(fold+'/'+f+'.pkl'):
+                deepahcmodel = pickle.load(open(fold+'/'+f+'.pkl','rb'))
+                b = deepahcmodel['output']
+            else:
+                b = np.load(fold+'/'+f+'.npy')
+
+        N = b.shape[0]
+        if reco2num != 'None':
+            n_clusters = int(reco2num_spk[i].split()[1])      
+            n_clusters = min(n_clusters,N) # whichever is minimum
+            if f!=reco2num_spk[i].split()[0]:
+                print('file mismatch',f,reco2num_spk[i].split()[0])
+            threshold = None
+        else:
+            n_clusters = None         
+       
+        labelfull = AHC(b, threshold=threshold,nspeaker=n_clusters)
+        ###################################################################
+        n_clusters = len(np.unique(labelfull))
+
+        
+        print("filename: {} n_clusters:{}".format(f,n_clusters))
+        uni1,method1=unique(labelfull,True)
+        results_dict[f]=method1     
+    write_results_dict(results_dict, out_file,reco2utt)
+
+
+if __name__ == "__main__":
+    args = setup()
+    if args.clustering == "PIC":
+        print('In PIC !')
+        PIC_clustering()
+    else:
+        AHC_clustering()
