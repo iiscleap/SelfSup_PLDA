@@ -23,10 +23,10 @@ dataset_etdnn=dihard_eval_2020
 dataset=$dataset_etdnn
 
 dataset_plda=dihard_dev_2020
-
+clustering=pic # or ahc
 eta=0.5
 
-outf=exp/selfsup_pic_eta${eta}/${dataset_etdnn}_scores/
+outf=exp/selfsup_${clustering}_eta${eta}/${dataset_etdnn}_scores/
 
 
 TYPE=parallel # training parallely multiple utterances
@@ -79,6 +79,7 @@ if [ $TYPE == "parallel" ]; then
 	--epochs 5 \
 	--lr 1e-3 \
     --eta $eta \
+	--clustering $clustering \
 	--band $band \
 	--dataset $dataset_etdnn \
 	--outf $outf \
@@ -95,11 +96,11 @@ else
 	$which_python xvec_ssc_plda_train.py \
 	--which_python $which_python \
 	--gpuid '0' \
-	--batchSize 64 \
-	--N_batches 1 \
-	--epoch 10 \
+	--N_batches 50 \
+	--epoch 5 \
 	--lr 1e-3 \
-    --eta 0.2 \
+    --eta $eta \
+	--clustering $clustering \
 	--dataset $dataset \
 	--outf $outf \
 	--xvecpath $kaldi_recipe_path/xvectors_npy/${dataset}/ \
