@@ -41,7 +41,7 @@ $ . ./path.sh
 $ ln -sf $KALDI_ROOT/egs/wsj/s5/utils .  # utils dir
 $ ln -sf $KALDI_ROOT/egs/wsj/s5/steps .  # steps dir
 ``` 
-- Input x-vectors features are obtained using Kaldi ETDNN X-vector model. Pre-trained x-vector model and plda model including global mean and PCA transform needed  for training are given in [``tools_diar/etdnn_fbank_xvector_models``](https://github.com/iiscleap/SelfSup_PLDA/tree/master/tools_diar/etdnn_fbank_xvector_models):
+- Input x-vectors features are obtained using Kaldi ETDNN X-vector model. Pre-trained x-vector model and plda model including global mean and PCA transform needed  for training are given in [``tools_diar/etdnn_fbank_xvector_models``](https://github.com/iiscleap/SelfSup_PLDA/tree/master/tools_diar/etdnn_fbank_xvector_models): ``tools_diar/etdnn_fbank_xvector_models/exp/final.raw`` is not uploaded because of space constraint. Please contact for access.
 -  Performance is evaluated using [dscore](https://github.com/nryant/dscore). Download all the required dependencies in the same python environment.
  ## Implementation 
  #### X-vectors Extraction
@@ -93,3 +93,10 @@ $ bash gen_rttm.sh --DATA <Ami/Dihard> --stage <1/2> --modelpath <path of model 
 ## Contact
 If you have any comment or question, please contact prachisingh@iisc.ac.in
 
+## Cite
+@article{singh2021self, 
+  title={Self-Supervised Metric Learning With Graph Clustering  For Speaker Diarization}, 
+  author={Singh, Prachi and Ganapathy, Sriram}, 
+  journal={arXiv preprint arXiv:2109.06824}, 
+  year={2021} 
+}

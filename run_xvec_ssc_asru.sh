@@ -9,12 +9,14 @@
 # dataset_etdnn : data dir on which to evaluate
 # dataset_plda : path of plda pickle file
 # outf :
+echo "################################################INFO########################################################"
 echo "set dataset_etdnn: name of data directory to train and evaluate options : dihard_dev_2020, dihard_eval_2020 
-ami_dev, ami_eval"
-echo "outf: path of output directory"
-echo "lr: learning rate"
-echo "alpha:"
-echo "eta: factor to reduce the lr after saturation for few epochs/minibatches"
+ami_dev, ami_eval (default:dihard_eval_2020)"
+echo "outf: path of output directory (default:exp/selfsup_pic_eta0.5/dihard_eval_2020_scores/)"
+echo "lr: learning rate (default:0.001)"
+echo "eta: factor to reduce the lr after saturation for few epochs/minibatches (default:0.5)"
+echo "clustering: type of clustering for initialization pic/ahc (Default:pic)"
+echo "###############################################################################################################"
 
 band=wide
 
