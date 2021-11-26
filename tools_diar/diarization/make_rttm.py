@@ -36,8 +36,7 @@ import argparse
 import sys
 from pdb import set_trace as bp
 
-sys.path.append('swbd_diar/steps/libs')
-import common_kaldi as common_lib
+import common as common_lib
 # from smart_open import smart_open
 
 def get_args():
